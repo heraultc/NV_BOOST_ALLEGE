@@ -1,0 +1,229 @@
+#=============================================================================#
+#  NV-BOOST — compilation automatique Linux / Windows / macOS
+#
+#  Ce fichier est lu par GitHub. À chaque "push" il loue 3 machines
+#  (une Ubuntu, une Windows, une Mac), compile le projet sur chacune,
+#  et dépose le résultat en téléchargement dans l'onglet "Actions".
+#=============================================================================#
+
+name: Build NV-BOOST ALLEGE
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:     [ 'v*' ]          # un tag v1.0.0 crée en plus une "Release"
+  pull_request:
+  workflow_dispatch:            # bouton "Run workflow" pour lancer à la main
+
+env:
+  QT_VERSION:     '6.8.3'       # LTS. Changez ici pour tout le projet.
+  OPENCV_VERSION: '4.12.0'      # version téléchargée sur Windows
+
+jobs:
+
+  #===========================================================================#
+  #  WINDOWS
+  #===========================================================================#
+  windows:
+    name: Windows x64
+    runs-on: windows-latest
+
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Installer Qt ${{ env.QT_VERSION }}
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host:    windows
+          target:  desktop
+          arch:    win64_msvc2022_64
+          cache:   true
+
+      - name: Télécharger et extraire OpenCV
+        shell: pwsh
+        run: |
+          $url  = "https://github.com/opencv/opencv/releases/download/${{ env.OPENCV_VERSION }}/opencv-${{ env.OPENCV_VERSION }}-windows.exe"
+          $dest = "$env:GITHUB_WORKSPACE\ocv"
+          Write-Host "Téléchargement de $url"
+          Invoke-WebRequest -Uri $url -OutFile opencv-sfx.exe
+          # L'exe est une archive 7-Zip auto-extractible : -o<dossier> -y
+          Start-Process -FilePath ".\opencv-sfx.exe" -ArgumentList "-o`"$dest`"", "-y" -Wait
+          $root = "$dest\opencv\build"
+          if (-not (Test-Path $root)) { throw "Extraction OpenCV échouée" }
+
+          # Le OpenCVConfig.cmake de la racine est un simple aiguilleur : il
+          # devine le dossier vc16/vc17 d'après la version de Visual Studio, et
+          # échoue dès que le runner embarque un VS plus récent que le pack.
+          # On vise donc directement le vrai config, dans x64\vcNN\lib.
+          Write-Host "Toolsets disponibles dans le pack :"
+          Get-ChildItem "$root\x64" -Directory | ForEach-Object { Write-Host "  - $($_.Name)" }
+
+          $cfgDir = Get-ChildItem "$root\x64" -Directory |
+                    Sort-Object Name -Descending |
+                    ForEach-Object { Join-Path $_.FullName "lib" } |
+                    Where-Object { Test-Path (Join-Path $_ "OpenCVConfig.cmake") } |
+                    Select-Object -First 1
+          if (-not $cfgDir) { throw "Aucun OpenCVConfig.cmake trouvé sous $root\x64" }
+
+          Write-Host "OpenCV_DIR   = $cfgDir"
+          Write-Host "OPENCV_ROOT  = $root"
+          "OpenCV_DIR=$cfgDir"  | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "OPENCV_ROOT=$root"   | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Configurer
+        shell: pwsh
+        run: |
+          cmake -B build -S . -A x64 `
+                -DCMAKE_BUILD_TYPE=Release `
+                -DOpenCV_DIR="$env:OpenCV_DIR"
+
+      - name: Compiler
+        run: cmake --build build --config Release --parallel
+
+      - name: Assembler le paquet (windeployqt + DLL OpenCV)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item build\Release\NightVector.exe dist\
+
+          # Le dossier des DLL est x64\vc16\bin ou x64\vc17\bin selon la version
+          $ocvBinDir = Get-ChildItem "$env:OPENCV_ROOT\x64" -Directory |
+                       ForEach-Object { Join-Path $_.FullName "bin" } |
+                       Where-Object { Test-Path $_ } |
+                       Select-Object -First 1
+          Write-Host "DLL OpenCV depuis $ocvBinDir"
+          # opencv_world*.dll : la bibliothèque ; ffmpeg*.dll : lecture/écriture vidéo
+          Copy-Item "$ocvBinDir\opencv_world*.dll"           dist\ -Exclude "*d.dll"
+          Copy-Item "$ocvBinDir\opencv_videoio_ffmpeg*.dll"  dist\
+
+          # windeployqt copie Qt + les modules QML nécessaires
+          windeployqt --release --compiler-runtime --qmldir qml dist\NightVector.exe
+
+      - name: Créer l'archive ZIP
+        shell: pwsh
+        run: Compress-Archive -Path dist\* -DestinationPath NV-BOOST-ALLEGE-windows-x64.zip -Force
+
+      - name: Publier l'artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NV-BOOST-ALLEGE-windows-x64
+          path: NV-BOOST-ALLEGE-windows-x64.zip
+          if-no-files-found: error
+
+  #===========================================================================#
+  #  macOS (Apple Silicon)
+  #===========================================================================#
+  macos:
+    name: macOS arm64
+    runs-on: macos-latest
+
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Installer OpenCV via Homebrew
+        run: |
+          brew update
+          brew install opencv
+          echo "Version installée :"
+          brew list --versions opencv
+
+      - name: Installer Qt ${{ env.QT_VERSION }}
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host:    mac
+          target:  desktop
+          arch:    clang_64
+          cache:   true
+
+      - name: Configurer
+        run: |
+          OCV_CMAKE=$(find "$(brew --prefix opencv)/lib/cmake" -maxdepth 1 -type d -name 'opencv*' | head -1)
+          echo "OpenCV_DIR = $OCV_CMAKE"
+          cmake -B build -S . \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0 \
+                -DOpenCV_DIR="$OCV_CMAKE"
+
+      - name: Compiler
+        run: cmake --build build --config Release --parallel
+
+      - name: Empaqueter le .app (macdeployqt)
+        run: |
+          macdeployqt build/NightVector.app -qmldir=qml -verbose=1
+          # Signature "ad-hoc" : pas de compte développeur requis, mais
+          # l'utilisateur devra tout de même autoriser l'app au 1er lancement.
+          codesign --force --deep --sign - build/NightVector.app
+
+      - name: Vérifier qu'aucune bibliothèque externe ne manque
+        run: |
+          echo "--- Dépendances restant hors du bundle (doit être vide) ---"
+          otool -L build/NightVector.app/Contents/MacOS/NightVector \
+            | grep -E '/opt/homebrew|/usr/local' || echo "OK : tout est embarqué"
+
+      - name: Créer l'archive ZIP
+        run: ditto -c -k --keepParent build/NightVector.app NV-BOOST-ALLEGE-macos-arm64.zip
+
+      - name: Publier l'artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NV-BOOST-ALLEGE-macos-arm64
+          path: NV-BOOST-ALLEGE-macos-arm64.zip
+          if-no-files-found: error
+
+  #===========================================================================#
+  #  LINUX — sert de garde-fou : vérifie que les modifications n'ont
+  #  rien cassé sur votre plateforme d'origine.
+  #===========================================================================#
+  linux:
+    name: Linux x64 (vérification)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Installer les dépendances
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build \
+            qt6-base-dev qt6-declarative-dev libqt6opengl6-dev \
+            libgl1-mesa-dev libopencv-dev
+
+      - name: Configurer et compiler
+        run: |
+          cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel
+
+      - name: Publier le binaire
+        uses: actions/upload-artifact@v4
+        with:
+          name: NV-BOOST-ALLEGE-linux-x64
+          path: build/NightVector
+
+  #===========================================================================#
+  #  RELEASE — se déclenche uniquement sur un tag "v..."
+  #===========================================================================#
+  release:
+    name: Publier la Release
+    needs: [ windows, macos ]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Récupérer tous les artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artefacts
+
+      - name: Créer la Release GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artefacts/**/*.zip
+          generate_release_notes: true
