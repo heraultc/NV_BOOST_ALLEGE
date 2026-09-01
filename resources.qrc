@@ -1,0 +1,26 @@
+<RCC>
+    <qresource prefix="/">
+        <file>logoWhite.png</file>
+        <file>qml/Main.qml</file>
+        <file>qml/NvButton.qml</file>
+        <file>qml/NvSlider.qml</file>
+        <file>qml/NvToggle.qml</file>
+        <file>qml/NvRadioButton.qml</file>
+        <file>qml/NvGroupBox.qml</file>
+        <file>qml/NvSourcePanel.qml</file>
+        <file>qml/NvPipelinePanel.qml</file>
+        <file>qml/NvParamsPanel.qml</file>
+        <file>qml/NvRecordPanel.qml</file>
+        <file>qml/NvVideoArea.qml</file>
+        <file>qml/NvStatusBar.qml</file>
+        <file>qml/NvLangSelector.qml</file>
+    </qresource>
+    <!-- ── Fichiers de langue : un JSON plat par langue ────────────────── -->
+    <qresource prefix="/i18n">
+        <file alias="fr.json">i18n/fr.json</file>
+        <file alias="en.json">i18n/en.json</file>
+        <file alias="es.json">i18n/es.json</file>
+        <file alias="pt.json">i18n/pt.json</file>
+        <file alias="zh_CN.json">i18n/zh_CN.json</file>
+    </qresource>
+</RCC>
